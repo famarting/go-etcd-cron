@@ -8,6 +8,8 @@ package staging
 import (
 	"strings"
 	"sync"
+
+	"github.com/diagridio/go-etcd-cron/api"
 )
 
 // Staging handles the staging queue for the Job scheduler. It tracks the
@@ -32,15 +34,36 @@ type Staging struct {
 	// and probes deliverablePrefixes with jobName[:length] for each length.
 	prefixLengths map[int]int
 
+	// observer, if set, is told about every change to the set of staged Job
+	// names. stagedNames counts the staged entries per Job name, since more
+	// than one version of a Job may be staged at once, so that the observer
+	// sees each name once. Only maintained when observer is set.
+	observer    api.StagingObserver
+	stagedNames map[string]int
+
+	// closed is set once the staged set has been dropped. No further changes
+	// are reported to the observer after that.
+	closed bool
+
 	lock sync.Mutex
 }
 
-func New() *Staging {
-	return &Staging{
+type Options struct {
+	// Observer is an optional observer of the staged Job names.
+	Observer api.StagingObserver
+}
+
+func New(opts Options) *Staging {
+	s := &Staging{
 		deliverablePrefixes: make(map[string]*uint64),
 		staged:              make(map[int64]string),
 		prefixLengths:       make(map[int]int),
+		observer:            opts.Observer,
 	}
+	if s.observer != nil {
+		s.stagedNames = make(map[string]int)
+	}
+	return s
 }
 
 // DeliverablePrefixes adds the job name prefixes that can currently be
@@ -54,6 +77,7 @@ func (s *Staging) DeliverablePrefixes(prefixes ...string) []int64 {
 	defer s.lock.Unlock()
 
 	var toEnqueue []int64
+	var unstaged []string
 	for _, prefix := range prefixes {
 		if _, ok := s.deliverablePrefixes[prefix]; !ok {
 			s.deliverablePrefixes[prefix] = new(uint64)
@@ -63,11 +87,18 @@ func (s *Staging) DeliverablePrefixes(prefixes ...string) []int64 {
 				if strings.HasPrefix(jobName, prefix) {
 					delete(s.staged, modRevision)
 					toEnqueue = append(toEnqueue, modRevision)
+					if s.forgetName(jobName) {
+						unstaged = append(unstaged, jobName)
+					}
 				}
 			}
 		}
 
 		(*s.deliverablePrefixes[prefix])++
+	}
+
+	if len(unstaged) > 0 && !s.closed {
+		s.observer.Unstaged(unstaged)
 	}
 
 	return toEnqueue
@@ -125,7 +156,18 @@ func (s *Staging) Stage(modRevision int64, jobName string) bool {
 		return false
 	}
 
+	if _, ok := s.staged[modRevision]; ok {
+		return true
+	}
+
 	s.staged[modRevision] = jobName
+
+	if s.observer != nil {
+		s.stagedNames[jobName]++
+		if s.stagedNames[jobName] == 1 && !s.closed {
+			s.observer.Staged(jobName)
+		}
+	}
 
 	return true
 }
@@ -135,5 +177,51 @@ func (s *Staging) Unstage(modRevision int64) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
+	jobName, ok := s.staged[modRevision]
+	if !ok {
+		return
+	}
+
 	delete(s.staged, modRevision)
+
+	if s.forgetName(jobName) && !s.closed {
+		s.observer.Unstaged([]string{jobName})
+	}
+}
+
+// Close drops the staged set, reporting the reset to the observer. Called
+// when the engine which owns this staging queue shuts down. No further
+// changes are reported to the observer after Close.
+func (s *Staging) Close() {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if s.closed {
+		return
+	}
+
+	s.closed = true
+	clear(s.staged)
+	clear(s.stagedNames)
+
+	if s.observer != nil {
+		s.observer.Reset()
+	}
+}
+
+// forgetName decrements the staged entry count of the given Job name, and
+// reports whether the name is no longer staged at all. Always returns false
+// when there is no observer.
+func (s *Staging) forgetName(jobName string) bool {
+	if s.observer == nil {
+		return false
+	}
+
+	s.stagedNames[jobName]--
+	if s.stagedNames[jobName] > 0 {
+		return false
+	}
+
+	delete(s.stagedNames, jobName)
+	return true
 }

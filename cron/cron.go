@@ -69,6 +69,12 @@ type Options struct {
 	// Channel will be closed on final shutdown.
 	ConsumerSink chan<- *api.InformerEvent
 
+	// StagingObserver is an optional observer of the Job names which are
+	// currently staged on this replica because they were undeliverable. See
+	// api.StagingObserver for the contract; it is called synchronously from
+	// the engine, so it must not block or call back into cron.
+	StagingObserver api.StagingObserver
+
 	// Workers is the number of workers that handle job events. The higher the
 	// number the more go routines will be spawned, each working over a partition
 	// of the total job space. The higher the number, the higher the number of
@@ -85,12 +91,13 @@ type Options struct {
 type cron struct {
 	log logr.Logger
 
-	key          *key.Key
-	client       clientapi.Interface
-	triggerFn    api.TriggerFunction
-	replicaData  *anypb.Any
-	consumerSink chan<- *api.InformerEvent
-	workers      uint32
+	key             *key.Key
+	client          clientapi.Interface
+	triggerFn       api.TriggerFunction
+	replicaData     *anypb.Any
+	consumerSink    chan<- *api.InformerEvent
+	stagingObserver api.StagingObserver
+	workers         uint32
 
 	api       *retry.Retry
 	elected   atomic.Bool
@@ -162,15 +169,16 @@ func newEtcd(opts Options) (api.Interface, error) {
 	})
 
 	return &cron{
-		log:          log,
-		key:          key,
-		replicaData:  opts.ReplicaData,
-		client:       client,
-		triggerFn:    opts.TriggerFn,
-		wleaderCh:    opts.WatchLeadership,
-		api:          retry.New(retry.Options{Log: log}),
-		consumerSink: opts.ConsumerSink,
-		workers:      workers,
+		log:             log,
+		key:             key,
+		replicaData:     opts.ReplicaData,
+		client:          client,
+		triggerFn:       opts.TriggerFn,
+		wleaderCh:       opts.WatchLeadership,
+		api:             retry.New(retry.Options{Log: log}),
+		consumerSink:    opts.ConsumerSink,
+		stagingObserver: opts.StagingObserver,
+		workers:         workers,
 	}, nil
 }
 
@@ -280,13 +288,14 @@ func (c *cron) runEngine(ctx context.Context, elected *elector.Elected) error {
 	c.elected.Store(true)
 
 	engine, err := engine.New(engine.Options{
-		Log:          c.log,
-		Key:          c.key,
-		Partitioner:  elected.Partitioner,
-		Client:       c.client,
-		TriggerFn:    c.triggerFn,
-		ConsumerSink: c.consumerSink,
-		Workers:      c.workers,
+		Log:             c.log,
+		Key:             c.key,
+		Partitioner:     elected.Partitioner,
+		Client:          c.client,
+		TriggerFn:       c.triggerFn,
+		ConsumerSink:    c.consumerSink,
+		StagingObserver: c.stagingObserver,
+		Workers:         c.workers,
 	})
 	if err != nil {
 		return err

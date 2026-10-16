@@ -95,6 +95,10 @@ In such cases, the trigger function can return `UNDELIVERABLE` to indicate that 
 Staged jobs can be marked as deliverable again by calling `cron.DeliverablePrefixes` with the prefixes of those job names.
 Jobs whose name match these prefixes will be re-enqueued for delivery.
 
+To see which jobs are waiting in the staging queue, set `Options.StagingObserver`.
+The observer is told when a job name is staged, when names leave staging, and when the whole staged set is dropped because the replica's engine stopped (on leadership rebalance and on shutdown).
+It is called synchronously from the engine, so it must return quickly and must not call back into the cron instance.
+
 ## Leadership
 
 Leadership is fully dynamic, meaning that crons can be added or removed from a cluster at any time, and the running crons will self organize rebalancing the jobs between them.

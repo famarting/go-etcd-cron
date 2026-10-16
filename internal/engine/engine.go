@@ -46,6 +46,9 @@ type Options struct {
 	// ConsumerSink is an optional sink to receive informer events.
 	ConsumerSink chan<- *api.InformerEvent
 
+	// StagingObserver is an optional observer of the staged Job names.
+	StagingObserver api.StagingObserver
+
 	Workers uint32
 }
 
@@ -81,6 +84,7 @@ func New(opts Options) (Interface, error) {
 		SchedulerBuilder: schedBuilder,
 		TriggerFn:        opts.TriggerFn,
 		ConsumerSink:     opts.ConsumerSink,
+		StagingObserver:  opts.StagingObserver,
 		Workers:          opts.Workers,
 	})
 

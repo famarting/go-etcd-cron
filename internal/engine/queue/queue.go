@@ -21,6 +21,7 @@ import (
 	"github.com/diagridio/go-etcd-cron/internal/counter"
 	"github.com/diagridio/go-etcd-cron/internal/engine/informer/consumer"
 	"github.com/diagridio/go-etcd-cron/internal/engine/queue/actioner"
+	"github.com/diagridio/go-etcd-cron/internal/engine/queue/actioner/staging"
 	"github.com/diagridio/go-etcd-cron/internal/engine/queue/loops/control"
 	"github.com/diagridio/go-etcd-cron/internal/engine/queue/loops/router"
 	"github.com/diagridio/go-etcd-cron/internal/engine/queue/loops/worker"
@@ -51,6 +52,9 @@ type Options struct {
 	// ConsumerSink is an optional channel to send informer events to.
 	ConsumerSink chan<- *api.InformerEvent
 
+	// StagingObserver is an optional observer of the staged Job names.
+	StagingObserver api.StagingObserver
+
 	// Workers is the number of workers to use for processing events in the
 	// queue.
 	Workers uint32
@@ -69,6 +73,8 @@ type Queue struct {
 	queue       *eventsqueue.Processor[int64, counter.Interface]
 	workers     uint32
 
+	stagingObserver api.StagingObserver
+
 	readyCh chan struct{}
 }
 
@@ -83,7 +89,8 @@ func New(opts Options) *Queue {
 		consumer: consumer.New(consumer.Options{
 			Sink: opts.ConsumerSink,
 		}),
-		workers: opts.Workers,
+		workers:         opts.Workers,
+		stagingObserver: opts.StagingObserver,
 	}
 
 	q.queue = eventsqueue.NewProcessor[int64, counter.Interface](
@@ -99,6 +106,11 @@ func New(opts Options) *Queue {
 func (q *Queue) Run(ctx context.Context) error {
 	defer q.consumer.DropAll()
 
+	// The staged set lives only as long as this queue. Report it as dropped
+	// once all loops have stopped, so no Job can be staged after the reset.
+	stage := staging.New(staging.Options{Observer: q.stagingObserver})
+	defer stage.Close()
+
 	act := actioner.New(actioner.Options{
 		Queue:        q.queue,
 		TriggerFn:    q.triggerFn,
@@ -107,6 +119,7 @@ func (q *Queue) Run(ctx context.Context) error {
 		Client:       q.client,
 		Key:          q.key,
 		Consumer:     q.consumer,
+		Staging:      stage,
 	})
 
 	q.log.Info("Starting queue with workers", "count", q.workers)

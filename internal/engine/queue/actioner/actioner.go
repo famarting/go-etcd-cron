@@ -29,6 +29,7 @@ type Options struct {
 	Key          *key.Key
 	Client       clientapi.Interface
 	Consumer     *consumer.Consumer
+	Staging      *staging.Staging
 }
 
 type Interface interface {
@@ -57,7 +58,7 @@ type actioner struct {
 
 func New(opts Options) Interface {
 	return &actioner{
-		staging:      staging.New(),
+		staging:      opts.Staging,
 		queue:        opts.Queue,
 		triggerFn:    opts.TriggerFn,
 		ctrlloop:     opts.ControlLoop,
